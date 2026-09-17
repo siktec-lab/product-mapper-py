@@ -11,6 +11,7 @@ Resolve a UPC, EAN, GTIN, ASIN or free-text title into a live Amazon catalog lis
 See https://product-mapper.com/docs for the full API reference.
 """
 
+from ._version import __version__
 from .client import DEFAULT_BASE_URL, AsyncProductMapper, ProductMapper
 from .exceptions import (
     AuthenticationError,
@@ -38,8 +39,6 @@ from .models import (
     MappingResult,
     QueuedLookup,
 )
-
-__version__ = "0.1.0"
 
 __all__ = [
     "DEFAULT_BASE_URL",
