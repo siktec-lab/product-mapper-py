@@ -29,7 +29,7 @@ __all__ = [
 #: Identifier kinds the API accepts. "auto" lets the server infer from the value shape.
 IDENTIFIER_TYPES = ("auto", "UPC", "EAN", "GTIN", "ASIN", "Title")
 
-#: Amazon marketplace regions the resolution engine can search.
+#: Amazon marketplace regions a lookup can be scoped to.
 REGIONS = (
     "US",
     "CA",
@@ -280,7 +280,7 @@ class JobStatus:
 class BatchItem:
     """One row of a batch job.
 
-    Deliberately a smaller field set than :class:`AmazonListing`: no link, is_active,
+    Batch rows carry fewer fields than :class:`AmazonListing`: no link, is_active,
     category, identifiers, list_price or the full offer breakdown. Look an identifier up
     individually with :meth:`ProductMapper.lookup` when you need those.
     """
