@@ -389,6 +389,8 @@ class HistoryRow:
     price: float | None = None
     formatted_price: str | None = None
     image_url: str | None = None
+    #: Live-verified values are "success" and "not_found". Note that history rows use a
+    #: different vocabulary than batch items, which report "completed" for a match.
     status: str = ""
     created_at: str | None = None
     #: How many times you have looked up this exact identifier.

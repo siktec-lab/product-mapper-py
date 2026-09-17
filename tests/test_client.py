@@ -10,6 +10,7 @@ import pytest
 from productmapper import (
     AsyncProductMapper,
     AuthenticationError,
+    ConnectionError,
     CreditsExhaustedError,
     JobFailedError,
     MappingResult,
@@ -508,3 +509,378 @@ class TestTypedLookupReturn:
         client, _ = make_client([json_response(RESULT_FIXTURE)])
         result = client.lookup(value="079361039905", poll=False)
         assert isinstance(result, MappingResult)
+
+
+# Fixtures below are copied from real responses captured against the production API,
+# so a drift in the contract shows up here rather than in a user's code.
+LIVE_LOOKUP: dict[str, Any] = {
+    "identifierType": "UPC",
+    "identifierValue": "753933140816",
+    "marketplace": "amazon",
+    "marketplaceId": "B09Z2J1MP2",
+    "amazonMarketplaceLabel": "US",
+    "timestamp": 1789581222664,
+    "listingDetails": {
+        "asin": "B09Z2J1MP2",
+        "title": "Husky Liners Weatherbeater Floor Mats",
+        "brand": "Husky Liners",
+        "manufacturer": "Husky Liners",
+        "category": "Floor Mats",
+        "categoryGroup": "Automotive Parts and Accessories",
+        "imageUrl": "https://m.media-amazon.com/images/I/41zAO8H.jpg",
+        "price": 80.99,
+        "formattedPrice": "$80.99",
+        "listPrice": 89.99,
+        "offerCount": 5,
+        "offerCountFba": 1,
+        "offerCountMerchant": 4,
+        "isBuyBoxWinner": True,
+        "salesRank": 67364,
+        "packageQuantity": 1,
+        "link": "https://www.amazon.com/dp/B09Z2J1MP2",
+        "isActive": True,
+        # Amazon own marketplace id, distinct from the top-level ASIN.
+        "marketplaceId": "ATVPDKIKX0DER",
+        "marketplaceLabel": "US",
+    },
+}
+
+LIVE_HISTORY: dict[str, Any] = {
+    "history": [
+        {
+            "id": "8f3f35d3-f1a0-46f8-beaa-1f291b114d92",
+            "identifierType": "UPC",
+            "identifierValue": "753933140816",
+            "marketplace": "amazon",
+            "marketplaceId": "B09Z2J1MP2",
+            "title": "Husky Liners Weatherbeater Floor Mats",
+            "brand": "Husky Liners",
+            "price": 80.99,
+            "formattedPrice": "$80.99",
+            "imageUrl": "https://example.com/i.jpg",
+            "status": "success",
+            "createdAt": "2026-09-16T17:53:42.666Z",
+            "seenCount": 1,
+            "lastSeenAt": "2026-09-16T17:53:42.666Z",
+        },
+        {
+            "id": "33049efb-7717-480b-bbac-593f6669f657",
+            "identifierType": "UPC",
+            "identifierValue": "079361039905",
+            "marketplace": "amazon",
+            "marketplaceId": None,
+            "title": None,
+            "brand": None,
+            "price": None,
+            "formattedPrice": None,
+            "imageUrl": None,
+            "status": "not_found",
+            "createdAt": "2026-09-17T13:59:08.172Z",
+            "listingDetails": None,
+        },
+    ],
+    "page": 1,
+    "pageSize": 25,
+    "total": 2,
+    "totalPages": 1,
+}
+
+
+class TestGetJobAndWait:
+    def test_fetches_a_single_job_status(self) -> None:
+        client, rec = make_client([json_response({"status": "processing", "message": "working"})])
+        status = client.get_job("job-7")
+        assert status.status == "processing"
+        assert not status.is_done
+        assert str(rec.requests[0].url) == "https://product-mapper.com/api/jobs/job-7"
+
+    def test_returns_the_result_of_a_completed_job(self) -> None:
+        client, _ = make_client([json_response({"status": "completed", "data": RESULT_FIXTURE})])
+        result = client.wait_for_job("job-8")
+        assert result.marketplace_id == "B004U9VVX6"
+
+    def test_rejects_a_missing_job_id_without_a_request(self) -> None:
+        client, rec = make_client([json_response({})])
+        with pytest.raises(ValidationError):
+            client.get_job("")
+        assert rec.requests == []
+
+    def test_wait_for_job_raises_on_failure(self) -> None:
+        client, _ = make_client([json_response({"status": "failed", "error": "boom"})])
+        with pytest.raises(JobFailedError):
+            client.wait_for_job("job-9", interval=0.001)
+
+
+class TestGetBatchDirect:
+    def test_rejects_a_missing_batch_id_without_a_request(self) -> None:
+        client, rec = make_client([json_response({})])
+        with pytest.raises(ValidationError):
+            client.get_batch("")
+        assert rec.requests == []
+
+    def test_rejects_a_missing_batch_id_for_csv(self) -> None:
+        client, rec = make_client([json_response({})])
+        with pytest.raises(ValidationError):
+            client.get_batch_csv("")
+        assert rec.requests == []
+
+
+class TestLiveVerifiedShapes:
+    def test_parses_a_real_single_lookup_response(self) -> None:
+        client, _ = make_client([json_response(LIVE_LOOKUP)])
+        r = client.lookup(value="753933140816", type="UPC")
+
+        assert r.marketplace_id == "B09Z2J1MP2"
+        assert r.amazon_marketplace_label == "US"
+        listing = r.listing_details
+        assert listing is not None
+        # The internal Amazon marketplace id, not the ASIN.
+        assert listing.marketplace_id == "ATVPDKIKX0DER"
+        assert listing.marketplace_label == "US"
+        assert listing.offer_count_fba == 1
+        assert listing.offer_count_merchant == 4
+        assert listing.list_price == 89.99
+        assert listing.is_buy_box_winner is True
+        assert listing.category_group == "Automotive Parts and Accessories"
+        assert listing.package_quantity == 1
+
+    def test_parses_a_real_history_page(self) -> None:
+        client, _ = make_client([json_response(LIVE_HISTORY)])
+        page = client.history()
+
+        # History rows report "success", while batch items report "completed" for a match.
+        assert [row.status for row in page.history] == ["success", "not_found"]
+        assert page.history[0].price == 80.99
+        assert page.history[0].seen_count == 1
+        assert page.history[1].title is None
+        assert page.history[1].listing_details is None
+
+    def test_batch_items_use_completed_not_success(self) -> None:
+        payload = {
+            **BATCH_FIXTURE,
+            "status": "completed",
+            "processedItems": 1,
+            "matchedItems": 1,
+            "items": [
+                {
+                    "id": "i1",
+                    "identifierType": "UPC",
+                    "identifierValue": "753933140816",
+                    "marketplaceId": "B09Z2J1MP2",
+                    "title": "Husky Liners Weatherbeater Floor Mats",
+                    "price": 80.99,
+                    "status": "completed",
+                }
+            ],
+        }
+        client, _ = make_client([json_response(payload)])
+        job = client.get_batch("batch-1")
+        assert job.items[0].status == "completed"
+        assert job.is_done
+
+
+def make_async_client(
+    responses: list[httpx.Response], **kwargs: Any
+) -> tuple[AsyncProductMapper, Recorder]:
+    recorder = Recorder(responses)
+    kwargs.setdefault("max_retries", 0)
+    client = AsyncProductMapper(API_KEY, transport=recorder.asyncs(), **kwargs)
+    return client, recorder
+
+
+class TestAsyncParity:
+    """The async client mirrors the sync one, so it needs the same coverage."""
+
+    async def test_lookup_many_and_wait_for_batch(self) -> None:
+        client, _ = make_async_client(
+            [
+                json_response(BATCH_FIXTURE, status=202),
+                json_response({**BATCH_FIXTURE, "status": "processing", "processedItems": 1}),
+                json_response(
+                    {
+                        **BATCH_FIXTURE,
+                        "status": "completed",
+                        "processedItems": 2,
+                        "matchedItems": 2,
+                    }
+                ),
+            ]
+        )
+        async with client:
+            job = await client.lookup_many(["a", "b"])
+            assert job.id == "batch-1"
+
+            seen: list[int] = []
+            done = await client.wait_for_batch(
+                job.id, interval=0.001, on_progress=lambda j: seen.append(j.processed_items)
+            )
+            assert done.status == "completed"
+            assert seen == [1, 2]
+
+    async def test_get_job_and_wait_for_job(self) -> None:
+        client, rec = make_async_client(
+            [json_response({"status": "completed", "data": RESULT_FIXTURE})]
+        )
+        async with client:
+            result = await client.wait_for_job("job-1")
+        assert result.marketplace_id == "B004U9VVX6"
+        assert "api/jobs/job-1" in str(rec.requests[0].url)
+
+    async def test_get_jobs(self) -> None:
+        client, rec = make_async_client([json_response({"jobs": {"a": {"status": "processing"}}})])
+        async with client:
+            jobs = await client.get_jobs(["a"])
+        assert set(jobs) == {"a"}
+        assert "ids=a" in str(rec.requests[0].url)
+
+    async def test_get_batch_and_csv(self) -> None:
+        client, rec = make_async_client(
+            [json_response(BATCH_FIXTURE), text_response("id,title\n1,Example")]
+        )
+        async with client:
+            job = await client.get_batch("batch-1")
+            csv_text = await client.get_batch_csv("batch-1")
+        assert job.id == "batch-1"
+        assert csv_text == "id,title\n1,Example"
+        assert "format=csv" in str(rec.requests[1].url)
+
+    async def test_history_and_deletes(self) -> None:
+        client, rec = make_async_client(
+            [
+                json_response(history_payload(1, 1)),
+                json_response({"success": True}),
+                json_response({"success": True}),
+            ]
+        )
+        async with client:
+            page = await client.history(page=1, search="coffee")
+            await client.delete_history_row("row-1")
+            await client.clear_history()
+
+        assert page.total_pages == 1
+        assert "search=coffee" in str(rec.requests[0].url)
+        assert rec.requests[1].method == "DELETE"
+        assert str(rec.requests[2].url) == "https://product-mapper.com/api/history"
+
+    async def test_returns_the_job_handle_when_polling_is_disabled(self) -> None:
+        client, _ = make_async_client(
+            [json_response({"status": "processing", "jobId": "job-5"}, status=202)]
+        )
+        async with client:
+            queued = await client.lookup(value="x", poll=False)
+        assert isinstance(queued, QueuedLookup)
+        assert queued.job_id == "job-5"
+
+    async def test_retries_a_500_then_succeeds(self) -> None:
+        client, rec = make_async_client(
+            [json_response({"error": "boom"}, status=500), json_response(RESULT_FIXTURE)],
+            max_retries=1,
+        )
+        async with client:
+            result = await client.lookup(value="x")
+        assert result.identifier_value == "079361039905"
+        assert len(rec.requests) == 2
+
+    async def test_rate_limit_metadata(self) -> None:
+        client, _ = make_async_client(
+            [
+                json_response(
+                    {"error": "slow down", "code": "RATE_LIMITED"},
+                    status=429,
+                    headers={"Retry-After": "3", "X-RateLimit-Limit": "60"},
+                )
+            ]
+        )
+        async with client:
+            with pytest.raises(RateLimitError) as info:
+                await client.lookup(value="x")
+        assert info.value.retry_after == 3
+        assert info.value.limit == 60
+
+    async def test_validation_happens_before_any_request(self) -> None:
+        client, rec = make_async_client([json_response(RESULT_FIXTURE)])
+        async with client:
+            with pytest.raises(ValidationError):
+                await client.lookup(value="  ")
+            with pytest.raises(ValidationError):
+                await client.lookup_many([])
+        assert rec.requests == []
+
+
+class TestNetworkFailures:
+    """Transport-level failures, which never reach a response."""
+
+    def _failing_transport(self, exc: Exception) -> httpx.MockTransport:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise exc
+
+        return httpx.MockTransport(handler)
+
+    def test_connect_error_becomes_connection_error(self) -> None:
+        client = ProductMapper(
+            API_KEY,
+            transport=self._failing_transport(httpx.ConnectError("dns failure")),
+            max_retries=0,
+        )
+        with pytest.raises(ConnectionError) as info:
+            client.lookup(value="x")
+        assert "POST api/map" in str(info.value)
+        client.close()
+
+    def test_timeout_becomes_timeout_error(self) -> None:
+        client = ProductMapper(
+            API_KEY,
+            transport=self._failing_transport(httpx.ReadTimeout("too slow")),
+            max_retries=0,
+        )
+        with pytest.raises(TimeoutError):
+            client.lookup(value="x")
+        client.close()
+
+    def test_network_failures_are_retried(self) -> None:
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise httpx.ConnectError("transient")
+            return httpx.Response(200, json=RESULT_FIXTURE)
+
+        client = ProductMapper(API_KEY, transport=httpx.MockTransport(handler), max_retries=1)
+        result = client.lookup(value="x")
+        assert result.identifier_value == "079361039905"
+        assert calls["n"] == 2
+        client.close()
+
+    async def test_async_connect_error(self) -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("dns failure")
+
+        client = AsyncProductMapper(API_KEY, transport=httpx.MockTransport(handler), max_retries=0)
+        async with client:
+            with pytest.raises(ConnectionError):
+                await client.lookup(value="x")
+
+
+class TestMarketplaceParameter:
+    def test_lookup_sends_marketplace(self) -> None:
+        import json
+
+        client, rec = make_client([json_response(RESULT_FIXTURE)])
+        client.lookup(value="x", marketplace="amazon")
+        body = json.loads(rec.requests[0].content)
+        assert body["marketplace"] == "amazon"
+
+    def test_lookup_many_sends_marketplace(self) -> None:
+        import json
+
+        client, rec = make_client([json_response(BATCH_FIXTURE, status=202)])
+        client.lookup_many(["a"], marketplace="amazon")
+        body = json.loads(rec.requests[0].content)
+        assert body["marketplace"] == "amazon"
+
+    def test_get_jobs_rejects_an_empty_sequence(self) -> None:
+        client, rec = make_client([json_response({"jobs": {}})])
+        with pytest.raises(ValidationError):
+            client.get_jobs([])
+        assert rec.requests == []
