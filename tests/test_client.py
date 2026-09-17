@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 import httpx
@@ -884,3 +885,40 @@ class TestMarketplaceParameter:
         with pytest.raises(ValidationError):
             client.get_jobs([])
         assert rec.requests == []
+
+
+class TestVersion:
+    """The version is declared once in pyproject.toml and read from package metadata."""
+
+    @pytest.mark.skipif(
+        sys.version_info < (3, 11), reason="tomllib is stdlib only from Python 3.11"
+    )
+    def test_version_matches_pyproject(self) -> None:
+        from pathlib import Path
+
+        import tomllib
+
+        import productmapper
+
+        root = Path(__file__).resolve().parent.parent
+        declared = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        assert productmapper.__version__ == declared["project"]["version"]
+
+    def test_user_agent_carries_the_version(self) -> None:
+        import productmapper
+
+        client, _ = make_client([json_response(RESULT_FIXTURE)])
+        assert client._headers["User-Agent"] == (
+            f"productmapper-python/{productmapper.__version__}"
+        )
+        client.close()
+
+    def test_version_is_sent_on_a_real_request(self) -> None:
+        import productmapper
+
+        client, rec = make_client([json_response(RESULT_FIXTURE)])
+        client.lookup(value="x")
+        assert rec.requests[0].headers["user-agent"] == (
+            f"productmapper-python/{productmapper.__version__}"
+        )
+        client.close()
