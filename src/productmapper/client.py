@@ -23,6 +23,7 @@ from typing import (
 
 import httpx
 
+from ._version import __version__
 from .exceptions import (
     ConnectionError,
     JobFailedError,
@@ -38,7 +39,6 @@ from .models import BatchJob, HistoryPage, HistoryRow, JobStatus, MappingResult,
 __all__ = ["DEFAULT_BASE_URL", "AsyncProductMapper", "ProductMapper"]
 
 DEFAULT_BASE_URL = "https://product-mapper.com"
-__version__ = "0.1.0"
 
 MAX_BATCH_ITEMS = 500
 MAX_JOB_IDS = 100
